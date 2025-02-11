@@ -2,11 +2,25 @@ import pyaudio
 import numpy as np
 import scipy.fftpack
 
+from scipy.interpolate import interp1d
+
 # Конфигурация аудио
 FORMAT = pyaudio.paInt16
-CHANNELS = 2  # Стерео захват для системного звука
-RATE = 44100
-CHUNK = 2048  # Размер блока данных
+CHANNELS = 1  # Стерео захват для системного звука
+
+SAMPLE_RATE = 44100  # Частота дискретизации
+CHUNK = 1024  # Размер блока данных
+
+# Границы частотных диапазонов (Гц)
+LOW_CUTOFF = 20
+MID_CUTOFF = 500
+HIGH_CUTOFF = 4000
+
+SERIAL_PORT = 'COM4'
+
+lmax = 0
+mmax = 0
+hmax = 0
 
 # Инициализация PyAudio
 p = pyaudio.PyAudio()
@@ -15,25 +29,16 @@ p = pyaudio.PyAudio()
 def find_loopback_device():
     for i in range(p.get_device_count()):
         dev_info = p.get_device_info_by_index(i)
-        if "Stereo Mix" in dev_info["name"] and dev_info["maxInputChannels"] > 0:
-            return i
-    return None
+        print ("-  ", (dev_info["name"]), i)
 
 # Получаем ID loopback-устройства
-device_id = find_loopback_device()
-
-if device_id is None:
-    print("Loopback устройство не найдено! Убедитесь, что:")
-    print("1. Включена запись с 'Stereo Mix' в настройках звука Windows")
-    print("2. Установлены последние аудио-драйверы")
-    p.terminate()
-    exit()
+device_id =  1
 
 # Открываем поток в loopback-режиме
 stream = p.open(
     format=FORMAT,
     channels=CHANNELS,
-    rate=RATE,
+    rate=SAMPLE_RATE,
     input=True,
     input_device_index=device_id,
     frames_per_buffer=CHUNK
@@ -54,33 +59,49 @@ def analyze_frequencies(data):
     
     # Выполнение FFT
     fft = scipy.fftpack.fft(audio_data)
-    freqs = scipy.fftpack.fftfreq(len(fft), 1.0 / RATE)
+    frequencies =  scipy.fftpack.fftfreq(len(audio_data), d=1/SAMPLE_RATE)
+    magnitudes = np.abs(fft) / len(fft)
     
-    # Фильтрация частот
-    mask = freqs > 0
-    fft = np.abs(fft[mask])
-    freqs = freqs[mask]
+    # Разделение частот на диапазоны
+    low_mask = (frequencies >= LOW_CUTOFF) & (frequencies < MID_CUTOFF)
+    mid_mask = (frequencies >= MID_CUTOFF) & (frequencies < HIGH_CUTOFF)
+    high_mask = frequencies >= HIGH_CUTOFF
+
+    # Расчет средних значений для каждого диапазона
+    low_level = np.mean(magnitudes[low_mask]) if any(low_mask) else 0
+    mid_level = np.mean(magnitudes[mid_mask]) if any(mid_mask) else 0
+    high_level = np.mean(magnitudes[high_mask]) if any(high_mask) else 0
+
     
-    # Расчет энергии в диапазонах
-    low = np.sum(fft[(freqs >= 20) & (freqs < 250)])
-    mid = np.sum(fft[(freqs >= 250) & (freqs < 4000)])
-    high = np.sum(fft[(freqs >= 4000) & (freqs < 20000)])
-    
-    return low, mid, high
+    return low_level, mid_level, high_level
+
+
+def mapFromTo(x,a,b,c,d):
+   y=(x-a)/(b-a)*(d-c)+c
+   return y
 
 try:
     print("Анализатор запущен. Нажмите Ctrl+C для остановки...")
     while True:
         data = stream.read(CHUNK, exception_on_overflow=False)
         low, mid, high = analyze_frequencies(data)
-        
+
+        lmax = max(lmax, low)
+        mmax = max(mmax, mid)
+        hmax = max(hmax, high)
+
+        low_dmx = mapFromTo(low, 0, lmax, 0, 255)
+        mid_dmx = mapFromTo(mid, 0, mmax, 0, 255)
+        high_dmx = mapFromTo(high, 0, hmax, 0, 255)
+
         # Нормализация значений
         total = low + mid + high
         if total > 0:
-            low_pct = low / total * 100
-            mid_pct = mid / total * 100
-            high_pct = high / total * 100
-            print(f"\rНизкие: {low_pct:5.1f}% | Средние: {mid_pct:5.1f}% | Высокие: {high_pct:5.1f}%", end="")
+            low_pct = low 
+            mid_pct = mid 
+            high_pct = high 
+            # print(f"\rНизкие: {low_pct:5.1f}\t|{lmax:5.1f} \t| Средние: {mid_pct:5.1f}\t|{mmax:5.1f} \t| Высокие: {high_pct:5.1f}\t|{hmax:5.1f}", end="")
+            print(f'\r{low_dmx:5.1f} \t{mid_dmx:5.1f} \t{high_dmx:5.1f}', end='', flush=True)
 
 except KeyboardInterrupt:
     print("\nОстановка анализатора...")
